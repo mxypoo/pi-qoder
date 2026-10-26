@@ -62,10 +62,10 @@ export default async function (pi: ExtensionAPI) {
       // 启动时若尚未登录或无网络则静默忽略
     }
 
-    // 将模型转为 Pi 模型格式
+    // 将模型转为 Pi 模型格式（开启 preferMaximumContext，解锁 1M 上下文）
     const currentEntries = catalogs.get(region.id) ?? [];
     const piModels = currentEntries.map((e) =>
-      toPiModel(e, `${shim.baseUrl()}/v1`, region.id)
+      toPiModel(e, `${shim.baseUrl()}/v1`, region.id, true)
     );
 
     // 2. 注册 Provider 给 Pi
@@ -128,7 +128,7 @@ export default async function (pi: ExtensionAPI) {
         const entries = (rawModels as any[]).map((m) => normalizeEntry(m, region));
         catalogs.set(region.id, entries);
         return entries.map((e) =>
-          toPiModel(e, `${shim.baseUrl()}/v1`, region.id)
+          toPiModel(e, `${shim.baseUrl()}/v1`, region.id, true)
         ) as any;
       },
     });
