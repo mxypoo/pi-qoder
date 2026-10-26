@@ -1,0 +1,33 @@
+{
+  "name": "pi-qoder",
+  "version": "1.0.0",
+  "description": "Bridge local Qoder & Qoder CN models into Pi coding agent seamlessly with zero-config browser device login and live protocol translation.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "update:vendor": "git submodule update --remote --merge"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "qoder",
+    "qoder-cn",
+    "deepseek",
+    "qwen",
+    "ai-coding"
+  ],
+  "author": "mxypoo <mxypoo@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mxypoo/pi-qoder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mxypoo/pi-qoder/issues"
+  },
+  "homepage": "https://github.com/mxypoo/pi-qoder#readme",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.0.0"
+  }
+}

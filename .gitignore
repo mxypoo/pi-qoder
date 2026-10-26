@@ -1,0 +1,19 @@
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sensitive credentials & tokens (NEVER COMMIT)
+qoder-auth.json
+.qoder-auth.*.json
+auth.json
+
+# Build outputs
+dist/
+lib/
+*.tsbuildinfo
+
+# OS metadata
+.DS_Store
+Thumbs.db
