@@ -1,6 +1,6 @@
 {
   "name": "pi-qoder",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bridge local Qoder & Qoder CN models into Pi coding agent seamlessly with zero-config browser device login and live protocol translation.",
   "type": "module",
   "main": "index.ts",
