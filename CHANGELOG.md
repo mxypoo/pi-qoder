@@ -4,6 +4,37 @@
 
 ---
 
+## [1.2.0] - 2026-11-03
+
+### 修复 (Fixed) — 启动被拖慢 10 秒
+
+- **根因：Qoder 国际版请求走了本地代理，且它被压在启动路径上。**
+  - 本机终端开着 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY=http://127.0.0.1:7890`，而 pi 宿主用 `undici.EnvHttpProxyAgent`（`dist/core/http-dispatcher.js`）接管了全局 `fetch`，所以扩展里的每个 `fetch()` 都真的走代理。
+  - 实测 `https://api3.qoder.sh/algo/api/v2/model/list`（国际版模型目录）：走代理 **固定 10.005s 后连接失败**；直连 0.10~0.70s。
+  - 而 pi 启动期会为每个已注册 provider 调一次 `refreshModels`，于是这一条域名就能把启动拖到 10~11 秒。修复前实测「仅加载本插件」5 次：`10.05 / 0.32 / 10.05 / 10.33 / 0.38`。
+
+### 新增 (Added)
+
+- **`no-proxy.ts`：Qoder 官方域名免代理直连。**
+  - 模块顶层（`index.ts` 第一条 import）就把 `qoder.sh / qoder.com / qoder.cn / qoder.com.cn` 及其通配子域追加进 `NO_PROXY` 与 `no_proxy`，早于任何一次 `fetch`。
+  - 只追加、不覆盖：GitHub / OpenAI / Claude 等业务继续走代理，零副作用。
+
+### 变更 (Changed)
+
+- **网络刷新彻底移出启动等待路径。** 原先 `ensureLoaded` 把「起 shim + 读凭据 + 拉名册」三步串在一起，`refreshModels` 必须等完整条网络链路。现拆为：
+  - `ensureLocal()`：只起本地 shim 与注册 provider，**零网络**（凭据由 shim 的惰性回调在真正发请求时再取）；
+  - `refreshCatalog()`：后台单飞刷新名册，带 `AbortSignal.timeout(1200)`，完成后重注册 provider。超时/离线/未登录一律静默保留静态兜底名册，不留半成品状态。
+  - 名册只是「给选择器看的目录」，晚一拍零功能代价：`fallback-models.ts` 的静态名册已能正常选模型、发请求。
+- `refreshModels` 永不再返回空数组：国际版没有静态名册时返回占位行，避免 pi 把整个 provider 从选择器里拿掉。
+
+### 实测 (Measured)
+
+- 仅加载本插件，TUI 启动（`PI_STARTUP_BENCHMARK=1`）8 次：`0.51 / 0.32 / 0.30 / 0.30 / 0.30 / 0.30 / 0.30 / 0.30` 秒。
+- `refreshModels` 回归为纯本地：`qoder-cn` 15ms、`qoder` 1ms（原为 10s 超时）。
+- pi 全量启动（含 3 个本地扩展 + 3 个 npm 包）从 **9~11s 降到 0.84~0.88s**。
+
+---
+
 ## [1.1.0] - 2026-10-28
 
 ### 性能 (Performance)

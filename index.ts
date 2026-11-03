@@ -1,3 +1,7 @@
+// ⚠ 必须是第一条 import：模块顶层就把 Qoder 域名写进 NO_PROXY，
+// 早于下面所有 vendor 模块与任何一次 fetch（详见 no-proxy.ts 里的实测数据）。
+import "./no-proxy.ts";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
@@ -26,18 +30,45 @@ import { fallbackEntriesFor } from "./fallback-models.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VENDOR_DIR = path.join(__dirname, "vendor/dsh-connect-qoder");
 
+/**
+ * 启动期惰性拉取模型目录的超时上限。
+ *
+ * 这个值直接决定「网络很差时 pi 启动最多被拖多久」，所以取得很短：
+ * 正常的模型目录响应在 100~700ms，1.2s 已经覆盖近 2 倍余量；超时也不影响可用性，
+ * 名册会退回 fallback-models.ts 里的静态兜底（模型可正常选择与调用）。
+ *
+ * 实测（本机、跨境直连、6 次采样）：正常 0.10~0.70s，劣化 2.5s → 1.2s 后最差不过 1.3s。
+ */
+const CATALOG_FETCH_TIMEOUT_MS = 1_200;
+
 interface RegionRuntime {
   id: string;
   displayName: string;
-  /** 当前模型目录：启动期为静态兜底，惰性初始化后被 live 名册覆盖 */
+  /** 当前模型目录：启动期为静态兜底，后台刷新后被 live 名册覆盖 */
   entries: CatalogEntry[];
   shim?: any;
-  /** 幂等的惰性初始化句柄 */
+  /** 幂等的本地初始化句柄（起 shim，零网络） */
   initialized?: Promise<void>;
+  /** 后台名册刷新的单飞句柄 */
+  refreshing?: Promise<void>;
 }
 
 export default async function (pi: ExtensionAPI) {
   const runtimes = new Map<string, RegionRuntime>();
+
+  /** 未登录/国际版无静态名册时的占位模型（保证 provider 不会从选择器里凭空消失） */
+  const placeholderModel = (rt: RegionRuntime, baseUrl: string) => ({
+    id: `${rt.id}-default`,
+    name: `${rt.displayName} (请先执行 /qoder-login 登录)`,
+    api: "openai-completions" as const,
+    provider: rt.id,
+    baseUrl: `${baseUrl}/v1`,
+    input: ["text"] as ("text" | "image")[],
+    reasoning: false,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 16_384,
+  });
 
   /** 把 CatalogEntry 映射为 Pi 模型定义 */
   const toPiModels = (rt: RegionRuntime, baseUrl: string) => {
@@ -57,21 +88,7 @@ export default async function (pi: ExtensionAPI) {
       baseUrl: `${baseUrl}/v1`,
       apiKey: shim ? shim.token() : "pending-init",
       api: "openai-completions",
-      models: (piModels.length > 0 ? piModels : [
-        // 兜底基础模型（未登录时展示）
-        {
-          id: `${regionId}-default`,
-          name: `${displayName} (请先执行 /qoder-login 登录)`,
-          api: "openai-completions",
-          provider: regionId,
-          baseUrl: `${baseUrl}/v1`,
-          input: ["text"],
-          reasoning: false,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 128000,
-          maxTokens: 16384,
-        },
-      ]) as any,
+      models: (piModels.length > 0 ? piModels : [placeholderModel(rt, baseUrl)]) as any,
       oauth: {
         name: `${displayName} (浏览器授权)`,
         login: async (callbacks) => {
@@ -107,27 +124,31 @@ export default async function (pi: ExtensionAPI) {
       // Pi 只在用户打开模型选择器时调用 refreshModels，不在启动时调用。
       // 因此它既是「选择器能看到最新名册」的挂载点，也是天然的惰性触发点。
       refreshModels: async () => {
-        await ensureLoaded(regionId);
-        return toPiModels(rt, rt.shim.baseUrl()) as any;
+        // 只等本地 shim（毫秒级），名册刷新丢到后台：
+        // 启动路径上一个网络请求都不等（详见 refreshCatalog 的注释）。
+        await ensureLocal(regionId);
+        void refreshCatalog(regionId);
+        const baseUrl = rt.shim.baseUrl();
+        const models = toPiModels(rt, baseUrl);
+        // 空列表会让 pi 把这个 provider 从选择器里整行拿掉（国际版没有静态名册），
+        // 所以永不让它为空：至少留一个指向登录提示的占位行。
+        return (models.length > 0 ? models : [placeholderModel(rt, baseUrl)]) as any;
       },
     });
   };
 
   /**
-   * 惰性初始化：首次真正使用该 provider 时才起 shim、读凭据、拉名册。
+   * 本地初始化：只起 shim，**零网络**。幂等且并发安全。
    *
-   * 原先这三步全在启动路径上串行执行（每个 region 一次 await shim.ready
-   * 加一次 fetchModels 网络请求），实测让每次启动多付约 0.6~1.0 秒。
-   * 幂等且并发安全（共享同一个 Promise）。
+   * 凭据不需要在这里取：shim 的 `resolveCredential` 是惰回调，
+   * 真正发请求时才去拿（并顺带完成可能需要的令牌刷新）。
    */
-  const ensureLoaded = (regionId: string): Promise<void> => {
+  const ensureLocal = (regionId: string): Promise<void> => {
     const rt = runtimes.get(regionId)!;
     if (rt.initialized) return rt.initialized;
 
     rt.initialized = (async () => {
       const region = REGIONS.find((r) => r.id === regionId)!;
-
-      // 1. 启动本地安全 Loopback Shim
       const shim = createQoderShim({
         region,
         resolveCredential: () => getCredentialFor(region.id),
@@ -141,19 +162,6 @@ export default async function (pi: ExtensionAPI) {
       });
       await shim.ready;
       rt.shim = shim;
-
-      // 2. 拉取最新模型名册（失败则保留静态兜底）
-      try {
-        const cred = await getCredentialFor(region.id);
-        if (cred) {
-          const rawModels = await fetchModels(region, cred);
-          rt.entries = (rawModels as any[]).map((m) => normalizeEntry(m, region));
-        }
-      } catch {
-        // 离线或未登录时静默使用静态兜底名册
-      }
-
-      // 3. 用真实 shim 地址与真实名册重注册（registerProvider 支持运行时重注册并合并）
       registerProvider(rt);
     })().catch((err) => {
       // 初始化失败必须清空句柄，否则后续重试会永远拿到同一个 rejected Promise
@@ -162,6 +170,44 @@ export default async function (pi: ExtensionAPI) {
     });
 
     return rt.initialized;
+  };
+
+  /**
+   * 后台刷新模型名册（带短超时），**绝不阻塞启动**。
+   *
+   * 为什么必须放到后台：pi 启动期会为每个已注册 provider 调一次 `refreshModels`，
+   * 而这是一个真实的跨境网络请求。本机实测（2026-11-03）：
+   *   - 走本地代理 `127.0.0.1:7890` → 固定 10.005s 后失败
+   *   - 直连（no-proxy.ts 注入后）→ 0.10~0.70s，恶劣时超 1.2s
+   * 即便有 1.2s 超时兜底，串行两个 region 仍会让启动多付 ~1.5s。
+   * 而名册只是「给选择器看的目录」，晚一拍没有任何功能代价：
+   * fallback-models.ts 里的静态名册已经能正常选模型、正常发请求。
+   *
+   * 单飞：同一个 region 的并发触发共享同一个 Promise，不重复打上游。
+   */
+  const refreshCatalog = (regionId: string): Promise<void> => {
+    const rt = runtimes.get(regionId)!;
+    if (rt.refreshing) return rt.refreshing;
+
+    const region = REGIONS.find((r) => r.id === regionId)!;
+    rt.refreshing = (async () => {
+      try {
+        const cred = await getCredentialFor(region.id);
+        if (!cred) return; // 未登录：名册留静态兜底
+        const rawModels = await fetchModels(region, cred, AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS));
+        const entries = (rawModels as any[]).map((m) => normalizeEntry(m, region));
+        if (entries.length === 0) return; // 空名册不得覆盖可用名册
+        rt.entries = entries;
+        await ensureLocal(regionId);
+        registerProvider(rt);
+      } catch {
+        // 离线 / 超时 / 未登录：静默保留静态兜底名册，不留任何半成品状态
+      } finally {
+        rt.refreshing = undefined;
+      }
+    })();
+
+    return rt.refreshing;
   };
 
   // ── 启动路径：只用静态兜底名册注册，零网络请求 ──
@@ -196,7 +242,9 @@ export default async function (pi: ExtensionAPI) {
     if (!regionId || !runtimes.has(regionId)) return;
     if (runtimes.get(regionId)!.shim) return; // 已就绪
     try {
-      await ensureLoaded(regionId);
+      // 只需本地 shim 就位就能发请求；名册刷新丢后台，不拖首轮响应
+      await ensureLocal(regionId);
+      void refreshCatalog(regionId);
     } catch {
       // 初始化失败时静默放行，让请求自然报错并保留重试机会
     }
